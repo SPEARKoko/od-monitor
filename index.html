@@ -6,44 +6,114 @@
 <title>OD 监测</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
-  body { font-family: sans-serif; margin: 16px; }
+  body { font-family: sans-serif; margin: 16px; background: #fafafa; color: #222; }
   #wrap { max-width: 900px; margin: auto; }
+  #login { margin-top: 40px; text-align: center; }
+  input[type=password] { font-size: 16px; padding: 8px; width: 220px; }
+  button { font-size: 16px; padding: 8px 16px; margin-left: 6px; }
+  #msg { color: #c00; margin-top: 10px; min-height: 1.2em; }
+  #main { display: none; }
+  #status { margin: 8px 0 16px; line-height: 1.6; }
 </style>
 </head>
 <body>
 <div id="wrap">
   <h2>OD 监测</h2>
-  <p id="status">加载中...</p>
-  <canvas id="chart"></canvas>
-</div>
-<script>
-async function main() {
-  // 读取 data.csv（加时间参数，避免读到旧的缓存）
-  const res = await fetch('data.csv?t=' + Date.now());
-  const text = await res.text();
-  const lines = text.trim().split('\n');
-  const labels = [], values = [];
-  for (let i = 1; i < lines.length; i++) {
-    const [t, v] = lines[i].split(',');
-    labels.push(t);
-    values.push(parseFloat(v));
-  }
-  document.getElementById('status').textContent =
-    '最新：' + labels[labels.length - 1] + '　OD = ' + values[values.length - 1];
 
-  new Chart(document.getElementById('chart'), {
+  <!-- 登录区 -->
+  <div id="login">
+    <p>请输入密码查看数据</p>
+    <input type="password" id="pw" placeholder="密码">
+    <button id="go">进入</button>
+    <div id="msg"></div>
+  </div>
+
+  <!-- 数据区 -->
+  <div id="main">
+    <div id="status"></div>
+    <button id="refresh">刷新数据</button>
+    <canvas id="chart" style="margin-top:12px"></canvas>
+  </div>
+</div>
+
+<script>
+let password = null;
+let chart = null;
+
+// base64 转字节
+const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+
+// 用密码解密（与 uploader.py 对应：PBKDF2-SHA256 + AES-GCM）
+async function decrypt(obj, pw) {
+  const enc = new TextEncoder();
+  const material = await crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveKey']);
+  const key = await crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt: b64(obj.salt), iterations: obj.iter, hash: 'SHA-256' },
+    material, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64(obj.iv) }, key, b64(obj.data));
+  return new TextDecoder().decode(plain);
+}
+
+async function loadData() {
+  const res = await fetch('data.enc.json?t=' + Date.now());
+  if (!res.ok) throw new Error('读取数据文件失败（' + res.status + '）');
+  const obj = await res.json();
+  let text;
+  try {
+    text = await decrypt(obj, password);
+  } catch (e) {
+    throw new Error('密码错误');
+  }
+  // 解析 CSV：time,v_off,v_on,diff
+  const lines = text.trim().split('\n');
+  const t = [], diff = [];
+  for (let i = 1; i < lines.length; i++) {
+    const p = lines[i].split(',');
+    t.push(p[0]);
+    diff.push(parseFloat(p[3]));
+  }
+  return { t, diff, last: lines[lines.length - 1].split(',') };
+}
+
+function draw(d) {
+  const s = document.getElementById('status');
+  s.innerHTML = '最新时间：' + d.last[0] +
+    '<br>关灯 ' + d.last[1] + ' V　开灯 ' + d.last[2] + ' V　信号（差值）' + d.last[3] + ' V' +
+    '<br>共 ' + d.t.length + ' 个数据点';
+  if (chart) chart.destroy();
+  chart = new Chart(document.getElementById('chart'), {
     type: 'line',
-    data: { labels: labels, datasets: [{ label: 'OD', data: values, borderWidth: 2, pointRadius: 2 }] },
+    data: { labels: d.t, datasets: [{ label: '信号（开灯 − 关灯）', data: d.diff, borderWidth: 2, pointRadius: 1 }] },
     options: {
       responsive: true,
       scales: {
-        x: { title: { display: true, text: '时间' } },
-        y: { title: { display: true, text: 'OD' } }
+        x: { title: { display: true, text: '时间' }, ticks: { maxTicksLimit: 8 } },
+        y: { title: { display: true, text: '电压 (V)' } }
       }
     }
   });
 }
-main().catch(e => document.getElementById('status').textContent = '加载失败：' + e);
+
+async function enter() {
+  const msg = document.getElementById('msg');
+  msg.textContent = '解密中...';
+  password = document.getElementById('pw').value;
+  try {
+    const d = await loadData();
+    document.getElementById('login').style.display = 'none';
+    document.getElementById('main').style.display = 'block';
+    draw(d);
+  } catch (e) {
+    msg.textContent = e.message;
+    password = null;
+  }
+}
+
+document.getElementById('go').onclick = enter;
+document.getElementById('pw').addEventListener('keydown', e => { if (e.key === 'Enter') enter(); });
+document.getElementById('refresh').onclick = async () => {
+  try { draw(await loadData()); } catch (e) { alert(e.message); }
+};
 </script>
 </body>
 </html>
