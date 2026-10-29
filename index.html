@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OD 监测</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  body { font-family: sans-serif; margin: 16px; }
+  #wrap { max-width: 900px; margin: auto; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h2>OD 监测</h2>
+  <p id="status">加载中...</p>
+  <canvas id="chart"></canvas>
+</div>
+<script>
+async function main() {
+  // 读取 data.csv（加时间参数，避免读到旧的缓存）
+  const res = await fetch('data.csv?t=' + Date.now());
+  const text = await res.text();
+  const lines = text.trim().split('\n');
+  const labels = [], values = [];
+  for (let i = 1; i < lines.length; i++) {
+    const [t, v] = lines[i].split(',');
+    labels.push(t);
+    values.push(parseFloat(v));
+  }
+  document.getElementById('status').textContent =
+    '最新：' + labels[labels.length - 1] + '　OD = ' + values[values.length - 1];
+
+  new Chart(document.getElementById('chart'), {
+    type: 'line',
+    data: { labels: labels, datasets: [{ label: 'OD', data: values, borderWidth: 2, pointRadius: 2 }] },
+    options: {
+      responsive: true,
+      scales: {
+        x: { title: { display: true, text: '时间' } },
+        y: { title: { display: true, text: 'OD' } }
+      }
+    }
+  });
+}
+main().catch(e => document.getElementById('status').textContent = '加载失败：' + e);
+</script>
+</body>
+</html>
