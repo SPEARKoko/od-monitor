@@ -92,6 +92,7 @@ function draw(rows) {
     '<br>三次信号：' + last.diff1.toFixed(4) + ' / ' + last.diff2.toFixed(4) + ' / ' + last.diff3.toFixed(4) + ' V' +
     '<br>平均：<b>' + last.diff_mean.toFixed(4) + ' V</b>　标准差：' + (last.diff_sd * 1000).toFixed(2) + ' mV' +
     '　CV：<span class="' + cvClass(last.cv_percent) + '">' + last.cv_percent.toFixed(2) + '%</span>' +
+    ('temp_c' in last ? '<br>芯片温度：' + last.temp_c.toFixed(1) + ' °C' : '') +
     '<br>共 ' + rows.length + ' 个测量点';
 
   const labels = rows.map(r => r.time.slice(5, 16));   // 显示 月-日 时:分
@@ -106,14 +107,19 @@ function draw(rows) {
         { label: '读数 1', data: pts('diff1'), showLine: false, pointRadius: 3, borderColor: '#e07b00', backgroundColor: '#e07b00' },
         { label: '读数 2', data: pts('diff2'), showLine: false, pointRadius: 3, borderColor: '#2a9d4b', backgroundColor: '#2a9d4b' },
         { label: '读数 3', data: pts('diff3'), showLine: false, pointRadius: 3, borderColor: '#9b3bd1', backgroundColor: '#9b3bd1' }
-      ]
+      ].concat('temp_c' in rows[0] ? [
+        { label: '温度 (°C)', data: pts('temp_c'), yAxisID: 'y1', borderWidth: 1.5, pointRadius: 0,
+          borderColor: '#d14b4b', borderDash: [5, 4] }
+      ] : [])
     },
     options: {
       responsive: true,
       interaction: { mode: 'index', intersect: false },
       scales: {
         x: { title: { display: true, text: '时间' }, ticks: { maxTicksLimit: 8 } },
-        y: { title: { display: true, text: '信号：开灯 − 暗电压 (V)' } }
+        y: { title: { display: true, text: '信号：开灯 − 暗电压 (V)' } },
+        y1: { display: 'temp_c' in rows[0], position: 'right',
+              title: { display: true, text: '温度 (°C)' }, grid: { drawOnChartArea: false } }
       }
     }
   });
