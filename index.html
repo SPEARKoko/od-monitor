@@ -14,14 +14,22 @@
   #msg { color: #c00; margin-top: 10px; min-height: 1.2em; }
   #main { display: none; }
   #status { margin: 8px 0 12px; line-height: 1.7; }
+  #status table { border-collapse: collapse; margin-top: 4px; }
+  #status th, #status td { padding: 3px 12px 3px 0; text-align: left; white-space: nowrap; }
+  #status th { font-weight: normal; color: #666; font-size: 14px; }
+  .scroll { overflow-x: auto; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
+  .bar button { margin: 0 6px 6px 0; }
+  .bar button.on { background: #1f6fd1; color: #fff; border: 1px solid #1f6fd1; }
   .good { color: #0a7d32; font-weight: bold; }
   .warn { color: #b26a00; font-weight: bold; }
   .bad  { color: #c00; font-weight: bold; }
+  #note { color: #666; font-size: 14px; margin-top: 6px; }
 </style>
 </head>
 <body>
 <div id="wrap">
-  <h2>OD 监测 · 稳定性测试</h2>
+  <h2>OD 监测</h2>
 
   <div id="login">
     <p>请输入密码查看数据</p>
@@ -32,18 +40,26 @@
 
   <div id="main">
     <div id="status"></div>
-    <button id="refresh">刷新数据</button>
+    <div class="bar">
+      <button id="refresh">刷新数据</button>
+      <button id="modeV" class="on">信号 (V)</button>
+      <button id="modeA">吸光度 A</button>
+    </div>
     <canvas id="chart" style="margin-top:12px"></canvas>
+    <div id="note"></div>
   </div>
 </div>
 
 <script>
 let password = null;
 let chart = null;
+let lastData = null;
+let mode = 'V';                       // 'V' = 信号电压；'A' = 吸光度 log10(V0/V)
 
+const COLORS = ['#1f6fd1', '#e07b00', '#2a9d4b', '#9b3bd1', '#00a0a8', '#8a6d1f'];
 const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 
-// 解密（与 uploader.py 对应：PBKDF2-SHA256 + AES-GCM）
+// 解密（与 uploader 对应：PBKDF2-SHA256 + AES-GCM）
 async function decrypt(obj, pw) {
   const enc = new TextEncoder();
   const material = await crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveKey']);
@@ -58,12 +74,27 @@ async function decrypt(obj, pw) {
 function parseCsv(text) {
   const lines = text.trim().split('\n');
   const head = lines[0].split(',');
-  const rows = lines.slice(1).map(l => {
+  return lines.slice(1).filter(l => l.trim()).map(l => {
     const p = l.split(','), r = {};
     head.forEach((h, i) => r[h] = (h === 'time') ? p[i] : parseFloat(p[i]));
     return r;
   });
-  return rows;
+}
+
+// 解密后的内容：新版是 {"format":"multi-v1","channels":{"1":"csv","2":"csv"}}；旧版就是一份 CSV（当作第 1 路）
+function parsePayload(text) {
+  const channels = [];
+  if (text.trim().startsWith('{')) {
+    const obj = JSON.parse(text);
+    Object.keys(obj.channels).map(Number).sort((a, b) => a - b).forEach(k => {
+      const rows = parseCsv(obj.channels[String(k)]);
+      if (rows.length) channels.push({ ch: k, rows: rows });
+    });
+  } else {
+    const rows = parseCsv(text);
+    if (rows.length) channels.push({ ch: 1, rows: rows });
+  }
+  return channels;
 }
 
 async function loadData() {
@@ -73,9 +104,9 @@ async function loadData() {
   let text;
   try { text = await decrypt(obj, password); }
   catch (e) { throw new Error('密码错误'); }
-  const rows = parseCsv(text);
-  if (!rows.length || !('diff_mean' in rows[0])) throw new Error('还没有新格式的数据，请等第一次测量完成');
-  return rows;
+  const channels = parsePayload(text);
+  if (!channels.length || !('diff_mean' in channels[0].rows[0])) throw new Error('还没有新格式的数据，请等第一次测量完成');
+  return channels;
 }
 
 function cvClass(cv) {
@@ -84,45 +115,76 @@ function cvClass(cv) {
   return 'bad';
 }
 
-function draw(rows) {
-  const last = rows[rows.length - 1];
-  document.getElementById('status').innerHTML =
-    '最新时间：' + last.time +
-    '<br>暗电压：' + last.v_off.toFixed(4) + ' V' +
-    '<br>三次信号：' + last.diff1.toFixed(4) + ' / ' + last.diff2.toFixed(4) + ' / ' + last.diff3.toFixed(4) + ' V' +
-    '<br>平均：<b>' + last.diff_mean.toFixed(4) + ' V</b>　标准差：' + (last.diff_sd * 1000).toFixed(2) + ' mV' +
-    '　CV：<span class="' + cvClass(last.cv_percent) + '">' + last.cv_percent.toFixed(2) + '%</span>' +
-    ('temp_c' in last ? '<br>芯片温度：' + last.temp_c.toFixed(1) + ' °C' : '') +
-    '<br>共 ' + rows.length + ' 个测量点';
+// 吸光度：每一路用自己的第一个点当空白 V0
+function absorbance(rows) {
+  const v0 = rows[0].diff_mean;
+  return rows.map(r => (v0 > 0 && r.diff_mean > 0) ? Math.log10(v0 / r.diff_mean) : null);
+}
 
-  const labels = rows.map(r => r.time.slice(5, 16));   // 显示 月-日 时:分
-  const pts = k => rows.map(r => r[k]);
+function draw(channels) {
+  lastData = channels;
+  const color = c => COLORS[(c.ch - 1) % COLORS.length];
+
+  // 状态表：每一路一行
+  let latest = channels[0].rows[channels[0].rows.length - 1];
+  channels.forEach(c => { const l = c.rows[c.rows.length - 1]; if (l.time > latest.time) latest = l; });
+  let html = '最新时间：' + latest.time +
+    ('temp_c' in latest && !isNaN(latest.temp_c) ? '　芯片温度：' + latest.temp_c.toFixed(1) + ' °C' : '') +
+    '<div class="scroll"><table><tr><th></th><th>平均信号</th><th>CV</th><th>暗电压</th><th>吸光度 A</th><th>点数</th></tr>';
+  channels.forEach(c => {
+    const l = c.rows[c.rows.length - 1], a = absorbance(c.rows);
+    const aLast = a[a.length - 1];
+    html += '<tr><td><span class="dot" style="background:' + color(c) + '"></span>第 ' + c.ch + ' 路</td>' +
+      '<td><b>' + l.diff_mean.toFixed(4) + ' V</b></td>' +
+      '<td><span class="' + cvClass(l.cv_percent) + '">' + l.cv_percent.toFixed(2) + '%</span></td>' +
+      '<td>' + l.v_off.toFixed(4) + ' V</td>' +
+      '<td>' + (aLast === null ? '—' : aLast.toFixed(3)) + '</td>' +
+      '<td>' + c.rows.length + '</td></tr>';
+  });
+  document.getElementById('status').innerHTML = html + '</table></div>';
+
+  // 横轴：所有路出现过的时间合在一起；某一路在某个时间没有点就留空
+  const times = Array.from(new Set(channels.flatMap(c => c.rows.map(r => r.time)))).sort();
+  const labels = times.map(t => t.slice(5, 16));          // 显示 月-日 时:分
+  const align = (rows, values) => {
+    const m = new Map(rows.map((r, i) => [r.time, values[i]]));
+    return times.map(t => m.has(t) ? m.get(t) : null);
+  };
+
+  const datasets = channels.map(c => ({
+    label: '第 ' + c.ch + ' 路',
+    data: align(c.rows, mode === 'A' ? absorbance(c.rows) : c.rows.map(r => r.diff_mean)),
+    borderWidth: 2, pointRadius: 0, spanGaps: true,
+    borderColor: color(c), backgroundColor: color(c)
+  }));
+  const tempSrc = channels[0].rows;
+  const hasTemp = 'temp_c' in tempSrc[0] && !isNaN(tempSrc[0].temp_c);
+  if (hasTemp) datasets.push({
+    label: '温度 (°C)', data: align(tempSrc, tempSrc.map(r => r.temp_c)), yAxisID: 'y1',
+    borderWidth: 1.5, pointRadius: 0, spanGaps: true, borderColor: '#d14b4b', backgroundColor: '#d14b4b', borderDash: [5, 4]
+  });
+
   if (chart) chart.destroy();
   chart = new Chart(document.getElementById('chart'), {
     type: 'line',
-    data: {
-      labels: labels,
-      datasets: [
-        { label: '平均信号', data: pts('diff_mean'), borderWidth: 2, pointRadius: 0, borderColor: '#1f6fd1' },
-        { label: '读数 1', data: pts('diff1'), showLine: false, pointRadius: 3, borderColor: '#e07b00', backgroundColor: '#e07b00' },
-        { label: '读数 2', data: pts('diff2'), showLine: false, pointRadius: 3, borderColor: '#2a9d4b', backgroundColor: '#2a9d4b' },
-        { label: '读数 3', data: pts('diff3'), showLine: false, pointRadius: 3, borderColor: '#9b3bd1', backgroundColor: '#9b3bd1' }
-      ].concat('temp_c' in rows[0] ? [
-        { label: '温度 (°C)', data: pts('temp_c'), yAxisID: 'y1', borderWidth: 1.5, pointRadius: 0,
-          borderColor: '#d14b4b', borderDash: [5, 4] }
-      ] : [])
-    },
+    data: { labels: labels, datasets: datasets },
     options: {
       responsive: true,
       interaction: { mode: 'index', intersect: false },
       scales: {
         x: { title: { display: true, text: '时间' }, ticks: { maxTicksLimit: 8 } },
-        y: { title: { display: true, text: '信号：开灯 − 暗电压 (V)' } },
-        y1: { display: 'temp_c' in rows[0], position: 'right',
+        y: { title: { display: true, text: mode === 'A' ? '吸光度 A = log10(V0 / V)' : '信号：开灯 − 暗电压 (V)' } },
+        y1: { display: hasTemp, position: 'right',
               title: { display: true, text: '温度 (°C)' }, grid: { drawOnChartArea: false } }
       }
     }
   });
+
+  document.getElementById('modeV').className = mode === 'V' ? 'on' : '';
+  document.getElementById('modeA').className = mode === 'A' ? 'on' : '';
+  document.getElementById('note').textContent = mode === 'A'
+    ? '吸光度：每一路用自己的第一个点当空白 V0。点图例可以隐藏某一路。'
+    : '点图例可以隐藏某一路。';
 }
 
 async function enter() {
@@ -130,10 +192,10 @@ async function enter() {
   msg.textContent = '解密中...';
   password = document.getElementById('pw').value;
   try {
-    const rows = await loadData();
+    const channels = await loadData();
     document.getElementById('login').style.display = 'none';
     document.getElementById('main').style.display = 'block';
-    draw(rows);
+    draw(channels);
   } catch (e) {
     msg.textContent = e.message;
     if (e.message === '密码错误') password = null;
@@ -145,6 +207,8 @@ document.getElementById('pw').addEventListener('keydown', e => { if (e.key === '
 document.getElementById('refresh').onclick = async () => {
   try { draw(await loadData()); } catch (e) { alert(e.message); }
 };
+document.getElementById('modeV').onclick = () => { mode = 'V'; if (lastData) draw(lastData); };
+document.getElementById('modeA').onclick = () => { mode = 'A'; if (lastData) draw(lastData); };
 </script>
 </body>
 </html>
